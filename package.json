@@ -7,7 +7,8 @@
     "dev": "wxt",
     "build": "wxt build",
     "zip": "wxt zip",
-    "postinstall": "wxt prepare"
+    "postinstall": "wxt prepare",
+    "release": "npm version patch && git push --follow-tags"
   },
   "devDependencies": {
     "typescript": "^5.7.3",
