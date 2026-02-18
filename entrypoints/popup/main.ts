@@ -24,6 +24,17 @@ async function saveKey() {
   }, 1500);
 }
 
+async function showOverlayOnActiveTab() {
+  const tabs = await browser.tabs.query({ active: true, currentWindow: true });
+  if (tabs[0]?.id) {
+    try {
+      await browser.tabs.sendMessage(tabs[0].id, { type: "SHOW_OVERLAY" });
+    } catch {
+      // Content script may not be injected on this page
+    }
+  }
+}
+
 apiKeyInput.addEventListener("input", saveKey);
 apiKeyInput.addEventListener("change", saveKey);
 
@@ -33,3 +44,4 @@ toggleKeyBtn.addEventListener("click", () => {
 });
 
 loadKey();
+showOverlayOnActiveTab();

@@ -40,6 +40,11 @@ export default defineContentScript({
 		currentSpeed = initialSpeed;
 
 		const { host, ui } = createOverlayUI(initialVoice, initialSpeed);
+
+		if (!isSupportedSite()) {
+			host.style.display = 'none';
+		}
+
 		document.body.appendChild(host);
 
 		async function savePosition(index: number) {
@@ -138,6 +143,11 @@ export default defineContentScript({
 
 		browser.runtime.onMessage.addListener(
 			(message: { type: string }, _sender, sendResponse) => {
+				if (message.type === 'SHOW_OVERLAY') {
+					host.style.display = '';
+					sendResponse({ ok: true });
+					return false;
+				}
 				if (message.type === 'GET_STATUS') {
 					if (!state || state.stopped) {
 						sendResponse({ playing: false });
@@ -364,12 +374,31 @@ interface PageSegment {
 const BLOCK_SELECTOR =
 	'p, h1, h2, h3, h4, h5, h6, li, blockquote, figcaption, pre, td, th, dt, dd';
 
+function getStripSelectors(): string {
+	if (window.location.hostname.endsWith('substack.com')) {
+		return '.footnote-anchor, [data-component-name="FootnoteAnchorToDOM"]';
+	}
+	return '';
+}
+
+function getCleanText(el: HTMLElement): string {
+	const strip = getStripSelectors();
+	if (!strip) {
+		return el.innerText?.trim() ?? '';
+	}
+	const clone = el.cloneNode(true) as HTMLElement;
+	for (const unwanted of clone.querySelectorAll(strip)) {
+		unwanted.remove();
+	}
+	return clone.innerText?.trim() ?? '';
+}
+
 function collectSegments(root: Element): PageSegment[] {
 	const blocks = root.querySelectorAll(BLOCK_SELECTOR);
 	const segments: PageSegment[] = [];
 
 	for (const el of blocks) {
-		const text = (el as HTMLElement).innerText?.trim();
+		const text = getCleanText(el as HTMLElement);
 		if (text) {
 			segments.push({ element: el, text });
 		}
@@ -636,6 +665,22 @@ const ICON_CLOSE = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" 
 const ICON_PREV = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>`;
 
 const ICON_NEXT = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>`;
+
+// --- Site detection ---
+
+function isSupportedSite(): boolean {
+	const hostname = window.location.hostname;
+	if (hostname === 'medium.com' || hostname.endsWith('.medium.com')) {
+		return true;
+	}
+	if (hostname.endsWith('.substack.com') || hostname === 'substack.com') {
+		return true;
+	}
+	if (hostname === 'x.com' || hostname === 'twitter.com') {
+		return true;
+	}
+	return false;
+}
 
 // --- Theme detection ---
 
