@@ -1,4 +1,4 @@
-import { apiKeyStorage, voiceStorage, speedStorage } from "@/utils/storage";
+import { apiKeyStorage, voiceStorage, speedStorage, positionsStorage } from "@/utils/storage";
 import { VOICES } from "@/utils/tts";
 
 const TARGET_CHUNK_SIZE = 800;
@@ -25,6 +25,8 @@ export default defineContentScript({
     let state: AudioQueueState | null = null;
     let highlightedElements: Element[] = [];
 
+    const pageUrl = window.location.href.split("#")[0];
+
     injectHighlightStyle();
 
     const initialVoice = await voiceStorage.getValue();
@@ -32,6 +34,28 @@ export default defineContentScript({
 
     const { host, ui } = createOverlayUI(initialVoice, initialSpeed);
     document.body.appendChild(host);
+
+    async function savePosition(index: number) {
+      const positions = await positionsStorage.getValue();
+      positions[pageUrl] = index;
+      await positionsStorage.setValue(positions);
+    }
+
+    async function getSavedPosition(): Promise<number | null> {
+      const positions = await positionsStorage.getValue();
+      return positions[pageUrl] ?? null;
+    }
+
+    async function clearPosition() {
+      const positions = await positionsStorage.getValue();
+      delete positions[pageUrl];
+      await positionsStorage.setValue(positions);
+    }
+
+    const savedPosition = await getSavedPosition();
+    if (savedPosition !== null) {
+      ui.setPlayButtonText("Resume");
+    }
 
     const apiKey = await apiKeyStorage.getValue();
     if (!apiKey) {
@@ -54,16 +78,20 @@ export default defineContentScript({
         return;
       }
 
+      const saved = await getSavedPosition();
+      const startIndex = (saved !== null && saved < chunks.length) ? saved : 0;
+
       state = {
         chunks,
-        currentIndex: 0,
+        currentIndex: startIndex,
         prefetchedAudio: new Map(),
         currentAudio: null,
         stopped: false,
       };
       ui.setPlaying(true);
+      ui.setPlayButtonText("Read Aloud");
       ui.setStatus("Generating speech…");
-      startPlayback();
+      startPlayback(startIndex);
     };
 
     ui.onStop = () => {
@@ -189,14 +217,14 @@ export default defineContentScript({
       }
     }
 
-    async function startPlayback() {
+    async function startPlayback(startIndex: number = 0) {
       if (!state || state.stopped) {
         return;
       }
 
-      const firstAudioPromise = fetchChunkAudio(0);
-      if (state.chunks.length > 1) {
-        fetchChunkAudio(1);
+      const firstAudioPromise = fetchChunkAudio(startIndex);
+      if (startIndex + 1 < state.chunks.length) {
+        fetchChunkAudio(startIndex + 1);
       }
 
       const audioUri = await firstAudioPromise;
@@ -205,7 +233,7 @@ export default defineContentScript({
         return;
       }
 
-      playChunk(0, audioUri);
+      playChunk(startIndex, audioUri);
     }
 
     function playChunk(index: number, audioDataUri: string) {
@@ -216,6 +244,7 @@ export default defineContentScript({
       state.currentIndex = index;
       state.prefetchedAudio.delete(index);
       ui.setStatus(`Playing ${index + 1} / ${state.chunks.length}`, "success");
+      savePosition(index);
 
       highlightChunk(index);
 
@@ -234,6 +263,7 @@ export default defineContentScript({
 
         const nextIndex = index + 1;
         if (nextIndex >= state.chunks.length) {
+          clearPosition();
           stop();
           ui.setPlaying(false);
           ui.setStatus("Done", "success");
@@ -402,6 +432,7 @@ function injectHighlightStyle() {
 interface OverlayUI {
   setStatus: (msg: string, type?: "info" | "error" | "success") => void;
   setPlaying: (playing: boolean) => void;
+  setPlayButtonText: (text: string) => void;
   showMissingKey: () => void;
   hideMissingKey: () => void;
   onPlay: (() => void) | null;
@@ -421,9 +452,11 @@ function createOverlayUI(
     "all: initial; position: fixed; z-index: 2147483647; bottom: 20px; right: 20px;";
   const shadow = host.attachShadow({ mode: "closed" });
 
+  const theme = detectPageTheme();
+
   shadow.innerHTML = `
     <style>${OVERLAY_CSS}</style>
-    <div class="widget collapsed" id="widget">
+    <div class="widget collapsed ${theme}" id="widget">
       <div class="missing-key hidden" id="missing-key">
         API key not set. Click the Announce extension icon to configure it.
       </div>
@@ -520,6 +553,10 @@ function createOverlayUI(
       statusEl.className = `status ${type}`;
     },
 
+    setPlayButtonText(text: string) {
+      playBtn.innerHTML = `${ICON_PLAY} ${text}`;
+    },
+
     setPlaying(playing) {
       playBtn.disabled = playing;
       stopBtn.disabled = !playing;
@@ -569,28 +606,94 @@ const ICON_PREV = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" s
 
 const ICON_NEXT = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>`;
 
+// --- Theme detection ---
+
+function detectPageTheme(): "light" | "dark" {
+  const el = document.documentElement;
+  const bg = getComputedStyle(el).backgroundColor;
+  if (!bg || bg === "transparent" || bg === "rgba(0, 0, 0, 0)") {
+    const bodyBg = getComputedStyle(document.body).backgroundColor;
+    return luminanceFromCss(bodyBg) > 0.5 ? "light" : "dark";
+  }
+  return luminanceFromCss(bg) > 0.5 ? "light" : "dark";
+}
+
+function luminanceFromCss(color: string): number {
+  const match = color.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+  if (!match) {
+    return 1;
+  }
+  const [r, g, b] = [+match[1], +match[2], +match[3]].map((c) => {
+    const s = c / 255;
+    return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+  });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
 // --- CSS ---
 
 const OVERLAY_CSS = `
   * { margin: 0; padding: 0; box-sizing: border-box; }
 
+  .widget.dark {
+    --bg-panel: #0f0f11;
+    --bg-surface: #18181b;
+    --border: #27272a;
+    --border-separator: #1e1e22;
+    --text: #e4e4e7;
+    --text-heading: #fff;
+    --text-muted: #a1a1aa;
+    --text-faint: #71717a;
+    --stop-bg: #27272a;
+    --stop-text: #a1a1aa;
+    --stop-hover-bg: #3f3f46;
+    --stop-hover-text: #e4e4e7;
+    --nav-bg: #18181b;
+    --nav-hover-bg: #27272a;
+    --nav-hover-border: #3f3f46;
+    --range-track: #27272a;
+    --shadow: rgba(0,0,0,0.4);
+    --shadow-lg: rgba(0,0,0,0.5);
+  }
+
+  .widget.light {
+    --bg-panel: #ffffff;
+    --bg-surface: #f4f4f5;
+    --border: #e4e4e7;
+    --border-separator: #e4e4e7;
+    --text: #27272a;
+    --text-heading: #09090b;
+    --text-muted: #71717a;
+    --text-faint: #a1a1aa;
+    --stop-bg: #f4f4f5;
+    --stop-text: #52525b;
+    --stop-hover-bg: #e4e4e7;
+    --stop-hover-text: #27272a;
+    --nav-bg: #f4f4f5;
+    --nav-hover-bg: #e4e4e7;
+    --nav-hover-border: #d4d4d8;
+    --range-track: #d4d4d8;
+    --shadow: rgba(0,0,0,0.08);
+    --shadow-lg: rgba(0,0,0,0.12);
+  }
+
   .widget {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     font-size: 13px;
-    color: #e4e4e7;
+    color: var(--text);
     line-height: 1.4;
   }
 
   .missing-key {
-    background: #0f0f11;
-    border: 1px solid #27272a;
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
     border-radius: 8px;
     padding: 8px 12px;
     font-size: 12px;
     color: #ef4444;
     max-width: 240px;
     line-height: 1.4;
-    box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+    box-shadow: 0 4px 20px var(--shadow);
     position: absolute;
     bottom: 56px;
     right: 0;
@@ -613,13 +716,13 @@ const OVERLAY_CSS = `
     display: flex;
     align-items: center;
     justify-content: center;
-    box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+    box-shadow: 0 4px 20px var(--shadow);
     transition: background 0.15s, transform 0.15s, box-shadow 0.15s;
   }
   .fab:hover {
     background: #818cf8;
     transform: scale(1.05);
-    box-shadow: 0 6px 24px rgba(0,0,0,0.5);
+    box-shadow: 0 6px 24px var(--shadow-lg);
   }
   .fab.playing { background: #ef4444; }
   .fab.playing:hover { background: #f87171; }
@@ -628,12 +731,12 @@ const OVERLAY_CSS = `
     display: none;
     flex-direction: column;
     gap: 12px;
-    background: #0f0f11;
-    border: 1px solid #27272a;
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
     border-radius: 12px;
     padding: 16px;
     width: 280px;
-    box-shadow: 0 8px 40px rgba(0,0,0,0.5);
+    box-shadow: 0 8px 40px var(--shadow-lg);
   }
 
   .widget.collapsed .fab { display: flex; }
@@ -649,13 +752,13 @@ const OVERLAY_CSS = `
   .panel-title {
     font-size: 14px;
     font-weight: 700;
-    color: #fff;
+    color: var(--text-heading);
     letter-spacing: -0.02em;
   }
   .close-btn {
     background: none;
     border: none;
-    color: #71717a;
+    color: var(--text-faint);
     cursor: pointer;
     padding: 4px;
     border-radius: 4px;
@@ -664,7 +767,7 @@ const OVERLAY_CSS = `
     justify-content: center;
     transition: color 0.15s;
   }
-  .close-btn:hover { color: #e4e4e7; }
+  .close-btn:hover { color: var(--text); }
 
   .controls { display: flex; gap: 8px; }
 
@@ -685,8 +788,8 @@ const OVERLAY_CSS = `
   }
   .play-btn { background: #6366f1; color: #fff; }
   .play-btn:hover:not(:disabled) { background: #818cf8; }
-  .stop-btn { background: #27272a; color: #a1a1aa; }
-  .stop-btn:hover:not(:disabled) { background: #3f3f46; color: #e4e4e7; }
+  .stop-btn { background: var(--stop-bg); color: var(--stop-text); }
+  .stop-btn:hover:not(:disabled) { background: var(--stop-hover-bg); color: var(--stop-hover-text); }
   button:disabled { opacity: 0.4; cursor: not-allowed; }
 
   .nav-controls {
@@ -697,10 +800,10 @@ const OVERLAY_CSS = `
   .nav-controls.hidden { display: none; }
 
   .nav-btn {
-    background: #18181b;
-    border: 1px solid #27272a;
+    background: var(--nav-bg);
+    border: 1px solid var(--border);
     border-radius: 6px;
-    color: #a1a1aa;
+    color: var(--text-muted);
     cursor: pointer;
     width: 32px;
     height: 32px;
@@ -711,9 +814,9 @@ const OVERLAY_CSS = `
     flex-shrink: 0;
   }
   .nav-btn:hover {
-    color: #e4e4e7;
-    border-color: #3f3f46;
-    background: #27272a;
+    color: var(--text);
+    border-color: var(--nav-hover-border);
+    background: var(--nav-hover-bg);
   }
 
   .status {
@@ -730,7 +833,7 @@ const OVERLAY_CSS = `
     display: flex;
     flex-direction: column;
     gap: 10px;
-    border-top: 1px solid #1e1e22;
+    border-top: 1px solid var(--border-separator);
     padding-top: 12px;
   }
   .setting-row {
@@ -741,16 +844,16 @@ const OVERLAY_CSS = `
   .setting-row label {
     font-size: 11px;
     font-weight: 500;
-    color: #a1a1aa;
+    color: var(--text-muted);
   }
 
   select {
     width: 100%;
-    background: #18181b;
-    border: 1px solid #27272a;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
     border-radius: 6px;
     padding: 6px 8px;
-    color: #e4e4e7;
+    color: var(--text);
     font-size: 12px;
     font-family: inherit;
     outline: none;
@@ -763,7 +866,7 @@ const OVERLAY_CSS = `
     -webkit-appearance: none;
     width: 100%;
     height: 4px;
-    background: #27272a;
+    background: var(--range-track);
     border-radius: 2px;
     outline: none;
     margin-top: 4px;

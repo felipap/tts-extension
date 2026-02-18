@@ -11,3 +11,8 @@ export const voiceStorage = storage.defineItem<string>("local:tts-voice", {
 export const speedStorage = storage.defineItem<number>("local:tts-speed", {
   fallback: 1.0,
 });
+
+export const positionsStorage = storage.defineItem<Record<string, number>>(
+  "local:reading-positions",
+  { fallback: {} },
+);
