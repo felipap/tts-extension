@@ -1,5 +1,5 @@
 import { generateSpeech, type Voice } from '@/utils/tts';
-import { apiKeyStorage, voiceStorage, speedStorage } from '@/utils/storage';
+import { apiKeyStorage, voiceStorage } from '@/utils/storage';
 
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
 	const bytes = new Uint8Array(buffer);
@@ -33,8 +33,7 @@ export default defineBackground(() => {
 		}
 
 		const voice = (await voiceStorage.getValue()) as Voice;
-		const speed = await speedStorage.getValue();
-		const audioBuffer = await generateSpeech(apiKey, text, voice, speed);
+		const audioBuffer = await generateSpeech(apiKey, text, voice);
 		const base64 = arrayBufferToBase64(audioBuffer);
 
 		return { audioDataUri: `data:audio/mpeg;base64,${base64}` };

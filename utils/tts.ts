@@ -11,7 +11,7 @@ export async function generateSpeech(
   apiKey: string,
   text: string,
   voice: Voice,
-  speed: number,
+  speed: number = 1,
 ): Promise<ArrayBuffer> {
   const trimmed = text.slice(0, MAX_CHARS);
 
