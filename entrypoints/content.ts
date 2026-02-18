@@ -23,13 +23,20 @@ export default defineContentScript({
     const { host, ui } = createOverlayUI(initialVoice, initialSpeed);
     document.body.appendChild(host);
 
-    ui.onPlay = async () => {
-      const apiKey = await apiKeyStorage.getValue();
-      if (!apiKey) {
-        ui.setStatus("API key not set. Open the extension popup to configure it.", "error");
-        return;
-      }
+    const apiKey = await apiKeyStorage.getValue();
+    if (!apiKey) {
+      ui.showMissingKey();
+    }
 
+    apiKeyStorage.watch((newKey) => {
+      if (newKey) {
+        ui.hideMissingKey();
+      } else {
+        ui.showMissingKey();
+      }
+    });
+
+    ui.onPlay = async () => {
       stop();
       const text = getPageText();
       const chunks = chunkText(text);
@@ -54,6 +61,25 @@ export default defineContentScript({
       stop();
       ui.setPlaying(false);
       ui.setStatus("");
+    };
+
+    ui.onPrev = () => {
+      if (!state || state.stopped) {
+        return;
+      }
+      const target = Math.max(0, state.currentIndex - 1);
+      skipToChunk(target);
+    };
+
+    ui.onNext = () => {
+      if (!state || state.stopped) {
+        return;
+      }
+      const target = state.currentIndex + 1;
+      if (target >= state.chunks.length) {
+        return;
+      }
+      skipToChunk(target);
     };
 
     ui.onVoiceChange = (voice: string) => {
@@ -101,6 +127,28 @@ export default defineContentScript({
           state.currentAudio.src = "";
         }
         state = null;
+      }
+    }
+
+    function skipToChunk(index: number) {
+      if (!state || state.stopped) {
+        return;
+      }
+      if (state.currentAudio) {
+        state.currentAudio.pause();
+        state.currentAudio.src = "";
+        state.currentAudio = null;
+      }
+      ui.setStatus(`Loading chunk ${index + 1}…`);
+      const cached = state.prefetchedAudio.get(index);
+      if (cached) {
+        playChunk(index, cached);
+      } else {
+        fetchChunkAudio(index).then((uri) => {
+          if (uri && state && !state.stopped) {
+            playChunk(index, uri);
+          }
+        });
       }
     }
 
@@ -226,8 +274,12 @@ export default defineContentScript({
 interface OverlayUI {
   setStatus: (msg: string, type?: "info" | "error" | "success") => void;
   setPlaying: (playing: boolean) => void;
+  showMissingKey: () => void;
+  hideMissingKey: () => void;
   onPlay: (() => void) | null;
   onStop: (() => void) | null;
+  onPrev: (() => void) | null;
+  onNext: (() => void) | null;
   onVoiceChange: ((voice: string) => void) | null;
   onSpeedChange: ((speed: number) => void) | null;
 }
@@ -244,6 +296,9 @@ function createOverlayUI(
   shadow.innerHTML = `
     <style>${OVERLAY_CSS}</style>
     <div class="widget collapsed" id="widget">
+      <div class="missing-key hidden" id="missing-key">
+        API key not set. Click the Announce extension icon to configure it.
+      </div>
       <button class="fab" id="fab" title="Announce – Read page aloud">
         ${ICON_SPEAKER}
       </button>
@@ -256,7 +311,11 @@ function createOverlayUI(
           <button class="play-btn" id="play-btn">${ICON_PLAY} Read Aloud</button>
           <button class="stop-btn" id="stop-btn" disabled>${ICON_STOP} Stop</button>
         </div>
-        <p class="status" id="status"></p>
+        <div class="nav-controls hidden" id="nav-controls">
+          <button class="nav-btn" id="prev-btn" title="Previous chunk">${ICON_PREV}</button>
+          <p class="status" id="status"></p>
+          <button class="nav-btn" id="next-btn" title="Next chunk">${ICON_NEXT}</button>
+        </div>
         <div class="settings">
           <div class="setting-row">
             <label>Voice</label>
@@ -273,13 +332,19 @@ function createOverlayUI(
 
   const widget = shadow.getElementById("widget")!;
   const fab = shadow.getElementById("fab")!;
+  const missingKeyEl = shadow.getElementById("missing-key")!;
   const closeBtn = shadow.getElementById("close-btn")!;
   const playBtn = shadow.getElementById("play-btn")! as HTMLButtonElement;
   const stopBtn = shadow.getElementById("stop-btn")! as HTMLButtonElement;
+  const navControls = shadow.getElementById("nav-controls")!;
+  const prevBtn = shadow.getElementById("prev-btn")! as HTMLButtonElement;
+  const nextBtn = shadow.getElementById("next-btn")! as HTMLButtonElement;
   const statusEl = shadow.getElementById("status")!;
   const voiceSelect = shadow.getElementById("voice-select")! as HTMLSelectElement;
   const speedRange = shadow.getElementById("speed-range")! as HTMLInputElement;
   const speedVal = shadow.getElementById("speed-val")!;
+
+  let keyMissing = false;
 
   for (const v of VOICES) {
     const opt = document.createElement("option");
@@ -292,6 +357,9 @@ function createOverlayUI(
   }
 
   fab.addEventListener("click", () => {
+    if (keyMissing) {
+      return;
+    }
     widget.classList.remove("collapsed");
     widget.classList.add("expanded");
   });
@@ -304,8 +372,20 @@ function createOverlayUI(
   const ui: OverlayUI = {
     onPlay: null,
     onStop: null,
+    onPrev: null,
+    onNext: null,
     onVoiceChange: null,
     onSpeedChange: null,
+
+    showMissingKey() {
+      keyMissing = true;
+      missingKeyEl.classList.remove("hidden");
+    },
+
+    hideMissingKey() {
+      keyMissing = false;
+      missingKeyEl.classList.add("hidden");
+    },
 
     setStatus(msg, type = "info") {
       statusEl.textContent = msg;
@@ -318,15 +398,19 @@ function createOverlayUI(
       if (playing) {
         fab.innerHTML = ICON_STOP_FAB;
         fab.classList.add("playing");
+        navControls.classList.remove("hidden");
       } else {
         fab.innerHTML = ICON_SPEAKER;
         fab.classList.remove("playing");
+        navControls.classList.add("hidden");
       }
     },
   };
 
   playBtn.addEventListener("click", () => ui.onPlay?.());
   stopBtn.addEventListener("click", () => ui.onStop?.());
+  prevBtn.addEventListener("click", () => ui.onPrev?.());
+  nextBtn.addEventListener("click", () => ui.onNext?.());
 
   voiceSelect.addEventListener("change", () => {
     ui.onVoiceChange?.(voiceSelect.value);
@@ -353,6 +437,10 @@ const ICON_STOP = `<svg width="16" height="16" viewBox="0 0 24 24" fill="current
 
 const ICON_CLOSE = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
 
+const ICON_PREV = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>`;
+
+const ICON_NEXT = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>`;
+
 // --- CSS ---
 
 const OVERLAY_CSS = `
@@ -363,6 +451,29 @@ const OVERLAY_CSS = `
     font-size: 13px;
     color: #e4e4e7;
     line-height: 1.4;
+  }
+
+  /* --- Missing key --- */
+
+  .missing-key {
+    background: #0f0f11;
+    border: 1px solid #27272a;
+    border-radius: 8px;
+    padding: 8px 12px;
+    font-size: 12px;
+    color: #ef4444;
+    max-width: 240px;
+    line-height: 1.4;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+    position: absolute;
+    bottom: 56px;
+    right: 0;
+    transition: opacity 0.15s, transform 0.15s;
+  }
+  .missing-key.hidden {
+    opacity: 0;
+    transform: translateY(4px);
+    pointer-events: none;
   }
 
   /* --- FAB --- */
@@ -460,12 +571,42 @@ const OVERLAY_CSS = `
   .stop-btn:hover:not(:disabled) { background: #3f3f46; color: #e4e4e7; }
   button:disabled { opacity: 0.4; cursor: not-allowed; }
 
+  /* --- Nav controls --- */
+
+  .nav-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .nav-controls.hidden { display: none; }
+
+  .nav-btn {
+    background: #18181b;
+    border: 1px solid #27272a;
+    border-radius: 6px;
+    color: #a1a1aa;
+    cursor: pointer;
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: color 0.15s, border-color 0.15s, background 0.15s;
+    flex-shrink: 0;
+  }
+  .nav-btn:hover {
+    color: #e4e4e7;
+    border-color: #3f3f46;
+    background: #27272a;
+  }
+
   /* --- Status --- */
 
   .status {
     font-size: 12px;
     text-align: center;
     min-height: 16px;
+    flex: 1;
   }
   .status.error { color: #ef4444; }
   .status.info { color: #6366f1; }
