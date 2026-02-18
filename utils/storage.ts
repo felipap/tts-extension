@@ -1,7 +1,7 @@
 import { storage } from "@wxt-dev/storage";
 
 export const apiKeyStorage = storage.defineItem<string>("local:openai-api-key", {
-  fallback: "",
+  fallback: import.meta.env.VITE_OPENAI_API_KEY ?? "",
 });
 
 export const voiceStorage = storage.defineItem<string>("local:tts-voice", {

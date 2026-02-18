@@ -1,9 +1,16 @@
-import { chunkText } from "@/utils/chunker";
 import { apiKeyStorage, voiceStorage, speedStorage } from "@/utils/storage";
 import { VOICES } from "@/utils/tts";
 
+const TARGET_CHUNK_SIZE = 800;
+const HIGHLIGHT_CLASS = "announce-ext-highlight";
+
+interface PageChunk {
+  text: string;
+  elements: Element[];
+}
+
 interface AudioQueueState {
-  chunks: string[];
+  chunks: PageChunk[];
   currentIndex: number;
   prefetchedAudio: Map<number, string>;
   currentAudio: HTMLAudioElement | null;
@@ -16,6 +23,9 @@ export default defineContentScript({
 
   async main() {
     let state: AudioQueueState | null = null;
+    let highlightedElements: Element[] = [];
+
+    injectHighlightStyle();
 
     const initialVoice = await voiceStorage.getValue();
     const initialSpeed = await speedStorage.getValue();
@@ -38,8 +48,7 @@ export default defineContentScript({
 
     ui.onPlay = async () => {
       stop();
-      const text = getPageText();
-      const chunks = chunkText(text);
+      const chunks = buildPageChunks();
       if (chunks.length === 0) {
         ui.setStatus("No text found on page", "error");
         return;
@@ -67,8 +76,7 @@ export default defineContentScript({
       if (!state || state.stopped) {
         return;
       }
-      const target = Math.max(0, state.currentIndex - 1);
-      skipToChunk(target);
+      skipToChunk(Math.max(0, state.currentIndex - 1));
     };
 
     ui.onNext = () => {
@@ -76,10 +84,9 @@ export default defineContentScript({
         return;
       }
       const target = state.currentIndex + 1;
-      if (target >= state.chunks.length) {
-        return;
+      if (target < state.chunks.length) {
+        skipToChunk(target);
       }
-      skipToChunk(target);
     };
 
     ui.onVoiceChange = (voice: string) => {
@@ -104,13 +111,11 @@ export default defineContentScript({
           }
           return false;
         }
-
         if (message.type === "START_READING") {
           ui.onPlay?.();
           sendResponse({ ok: true });
           return false;
         }
-
         if (message.type === "STOP_READING") {
           ui.onStop?.();
           sendResponse({ ok: true });
@@ -120,6 +125,7 @@ export default defineContentScript({
     );
 
     function stop() {
+      clearHighlight();
       if (state) {
         state.stopped = true;
         if (state.currentAudio) {
@@ -165,7 +171,7 @@ export default defineContentScript({
       try {
         const res = await browser.runtime.sendMessage({
           type: "TTS_SPEAK",
-          text: state.chunks[index],
+          text: state.chunks[index].text,
         });
         if (res.error) {
           console.error(`[Announce] TTS error for chunk ${index}:`, res.error);
@@ -189,7 +195,6 @@ export default defineContentScript({
       }
 
       const firstAudioPromise = fetchChunkAudio(0);
-
       if (state.chunks.length > 1) {
         fetchChunkAudio(1);
       }
@@ -211,6 +216,8 @@ export default defineContentScript({
       state.currentIndex = index;
       state.prefetchedAudio.delete(index);
       ui.setStatus(`Playing ${index + 1} / ${state.chunks.length}`, "success");
+
+      highlightChunk(index);
 
       const audio = new Audio(audioDataUri);
       state.currentAudio = audio;
@@ -253,21 +260,142 @@ export default defineContentScript({
       });
     }
 
-    function getPageText(): string {
+    function highlightChunk(index: number) {
+      clearHighlight();
+      if (!state) {
+        return;
+      }
+      const chunk = state.chunks[index];
+      if (!chunk) {
+        return;
+      }
+
+      for (const el of chunk.elements) {
+        el.classList.add(HIGHLIGHT_CLASS);
+      }
+      highlightedElements = [...chunk.elements];
+
+      if (chunk.elements.length > 0) {
+        chunk.elements[0].scrollIntoView({ behavior: "smooth", block: "center" });
+      }
+    }
+
+    function clearHighlight() {
+      for (const el of highlightedElements) {
+        el.classList.remove(HIGHLIGHT_CLASS);
+      }
+      highlightedElements = [];
+    }
+
+    function buildPageChunks(): PageChunk[] {
       const selection = window.getSelection()?.toString().trim();
       if (selection) {
-        return selection;
+        return buildChunksFromText(selection);
       }
 
-      const article = document.querySelector("article");
-      if (article) {
-        return article.innerText.trim();
+      const root = document.querySelector("article") || document.body;
+      const segments = collectSegments(root);
+
+      if (segments.length === 0) {
+        const text = root.innerText?.trim();
+        if (text) {
+          return buildChunksFromText(text);
+        }
+        return [];
       }
 
-      return document.body.innerText.trim();
+      return groupSegmentsIntoChunks(segments);
     }
   },
 });
+
+// --- Text extraction helpers ---
+
+interface PageSegment {
+  element: Element;
+  text: string;
+}
+
+const BLOCK_SELECTOR =
+  "p, h1, h2, h3, h4, h5, h6, li, blockquote, figcaption, pre, td, th, dt, dd";
+
+function collectSegments(root: Element): PageSegment[] {
+  const blocks = root.querySelectorAll(BLOCK_SELECTOR);
+  const segments: PageSegment[] = [];
+
+  for (const el of blocks) {
+    const text = (el as HTMLElement).innerText?.trim();
+    if (text) {
+      segments.push({ element: el, text });
+    }
+  }
+
+  return segments;
+}
+
+function groupSegmentsIntoChunks(segments: PageSegment[]): PageChunk[] {
+  const chunks: PageChunk[] = [];
+  let currentText = "";
+  let currentElements: Element[] = [];
+
+  for (const seg of segments) {
+    if (currentText && currentText.length + seg.text.length + 2 > TARGET_CHUNK_SIZE) {
+      chunks.push({ text: currentText, elements: currentElements });
+      currentText = seg.text;
+      currentElements = [seg.element];
+    } else {
+      currentText = currentText ? `${currentText}\n\n${seg.text}` : seg.text;
+      currentElements.push(seg.element);
+    }
+  }
+
+  if (currentText) {
+    chunks.push({ text: currentText, elements: currentElements });
+  }
+
+  return chunks;
+}
+
+function buildChunksFromText(text: string): PageChunk[] {
+  const paragraphs = text
+    .split(/\n\s*\n/)
+    .map((p) => p.trim())
+    .filter(Boolean);
+
+  if (paragraphs.length === 0) {
+    return [];
+  }
+
+  const chunks: PageChunk[] = [];
+  let current = "";
+
+  for (const para of paragraphs) {
+    if (current && current.length + para.length + 2 > TARGET_CHUNK_SIZE) {
+      chunks.push({ text: current, elements: [] });
+      current = para;
+    } else {
+      current = current ? `${current}\n\n${para}` : para;
+    }
+  }
+
+  if (current) {
+    chunks.push({ text: current, elements: [] });
+  }
+
+  return chunks;
+}
+
+function injectHighlightStyle() {
+  const style = document.createElement("style");
+  style.textContent = `
+    .${HIGHLIGHT_CLASS} {
+      background-color: rgba(99, 102, 241, 0.15) !important;
+      border-radius: 4px;
+      transition: background-color 0.3s;
+    }
+  `;
+  document.head.appendChild(style);
+}
 
 // --- Overlay UI ---
 
@@ -453,8 +581,6 @@ const OVERLAY_CSS = `
     line-height: 1.4;
   }
 
-  /* --- Missing key --- */
-
   .missing-key {
     background: #0f0f11;
     border: 1px solid #27272a;
@@ -475,8 +601,6 @@ const OVERLAY_CSS = `
     transform: translateY(4px);
     pointer-events: none;
   }
-
-  /* --- FAB --- */
 
   .fab {
     width: 48px;
@@ -500,8 +624,6 @@ const OVERLAY_CSS = `
   .fab.playing { background: #ef4444; }
   .fab.playing:hover { background: #f87171; }
 
-  /* --- Panel --- */
-
   .panel {
     display: none;
     flex-direction: column;
@@ -518,8 +640,6 @@ const OVERLAY_CSS = `
   .widget.collapsed .panel { display: none; }
   .widget.expanded .fab { display: none; }
   .widget.expanded .panel { display: flex; }
-
-  /* --- Panel header --- */
 
   .panel-header {
     display: flex;
@@ -546,8 +666,6 @@ const OVERLAY_CSS = `
   }
   .close-btn:hover { color: #e4e4e7; }
 
-  /* --- Controls --- */
-
   .controls { display: flex; gap: 8px; }
 
   .play-btn, .stop-btn {
@@ -570,8 +688,6 @@ const OVERLAY_CSS = `
   .stop-btn { background: #27272a; color: #a1a1aa; }
   .stop-btn:hover:not(:disabled) { background: #3f3f46; color: #e4e4e7; }
   button:disabled { opacity: 0.4; cursor: not-allowed; }
-
-  /* --- Nav controls --- */
 
   .nav-controls {
     display: flex;
@@ -600,8 +716,6 @@ const OVERLAY_CSS = `
     background: #27272a;
   }
 
-  /* --- Status --- */
-
   .status {
     font-size: 12px;
     text-align: center;
@@ -611,8 +725,6 @@ const OVERLAY_CSS = `
   .status.error { color: #ef4444; }
   .status.info { color: #6366f1; }
   .status.success { color: #22c55e; }
-
-  /* --- Settings --- */
 
   .settings {
     display: flex;
