@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Announce</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <div class="container">
+      <header>
+        <h1>Announce</h1>
+        <p class="subtitle">Read any webpage aloud</p>
+      </header>
+
+      <section>
+        <label for="api-key">OpenAI API Key</label>
+        <div class="key-row">
+          <input
+            type="password"
+            id="api-key"
+            placeholder="sk-..."
+            spellcheck="false"
+            autocomplete="off"
+          />
+          <button id="toggle-key" class="icon-btn" title="Show/hide key">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+              <circle cx="12" cy="12" r="3"/>
+            </svg>
+          </button>
+        </div>
+        <p id="saved-msg" class="saved-msg"></p>
+      </section>
+
+      <p class="hint">Click the floating button on any page to start reading.</p>
+    </div>
+
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
