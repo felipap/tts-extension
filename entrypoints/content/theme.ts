@@ -6,9 +6,6 @@ export function isSupportedSite(): boolean {
 	if (hostname.endsWith('.substack.com') || hostname === 'substack.com') {
 		return true;
 	}
-	if (hostname === 'x.com' || hostname === 'twitter.com') {
-		return true;
-	}
 	return false;
 }
 
